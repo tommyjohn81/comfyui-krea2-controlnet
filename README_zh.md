@@ -4,6 +4,7 @@
 <img width="4259" height="2044" alt="Krea2t_00048_" src="https://github.com/user-attachments/assets/9b7390fb-420c-4b15-8c5b-88a24969280e" />
 
 <img width="4259" height="2044" alt="Krea2t_00026_" src="https://github.com/user-attachments/assets/429b7373-5716-420a-ba3e-aae261a580f6" />
+
 ## 节点
 
 - `Krea2 Control LoRA Loader`：从 `models/loras` 加载 Krea2 Control LoRA，将兼容的 block LoRA 权重应用到 Krea2 模型，替换输入投影层，并注册采样时需要的模型 wrapper。
