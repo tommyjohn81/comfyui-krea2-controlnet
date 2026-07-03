@@ -3,6 +3,9 @@
 Chinese documentation: [README_zh.md](README_zh.md)
 
 Native-style ComfyUI nodes for Krea2 Control LoRA inference. The plugin keeps ComfyUI's built-in Krea2 inference path intact, replaces the expanded input projection from the LoRA checkpoint, and injects a VAE-encoded control latent during sampling.
+<img width="4259" height="2044" alt="Krea2t_00048_" src="https://github.com/user-attachments/assets/9b7390fb-420c-4b15-8c5b-88a24969280e" />
+
+<img width="4259" height="2044" alt="Krea2t_00026_" src="https://github.com/user-attachments/assets/429b7373-5716-420a-ba3e-aae261a580f6" />
 
 ## Nodes
 
@@ -11,6 +14,7 @@ Native-style ComfyUI nodes for Krea2 Control LoRA inference. The plugin keeps Co
 - `Krea2 Control Apply`: converts the encoded control latent into the Krea2 latent space and attaches it to the model after the Control LoRA has been loaded.
 
 ## Basic Workflow
+<img width="2018" height="721" alt="8c831c0055122b8090e69e2dd97cbce5" src="https://github.com/user-attachments/assets/1859f3d0-eb56-4729-abc2-8757af77bc34" />
 
 1. Prepare a control image with normal ComfyUI nodes, or connect a [`comfyui_controlnet_aux`](https://github.com/Fannovel16/comfyui_controlnet_aux) preprocessor output.
 2. Encode that control image with `Krea2 Control Image Encode` using the Krea2/Qwen image VAE. Keep the default `match_latent_size` and connect the sampler latent to this node's `latent` input.
