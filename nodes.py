@@ -18,7 +18,7 @@ EPS = 1e-6
 
 
 class Krea2ControlInputProjection(nn.Module):
-    def __init__(self, weight, bias=None, image_features=None):
+    def __init__(self, weight, bias=None, image_features=None, original_first=None):
         super().__init__()
         if weight.ndim != 2:
             raise ValueError("Krea2 control input projection weight must be a 2D tensor.")
@@ -41,6 +41,14 @@ class Krea2ControlInputProjection(nn.Module):
         else:
             self.bias = nn.Parameter(bias.detach().cpu().clone(), requires_grad=False)
         self.control_tokens = None
+        object.__setattr__(self, "_original_first", original_first)
+
+    @property
+    def original_first(self):
+        return object.__getattribute__(self, "_original_first")
+
+    def set_original_first(self, original_first):
+        object.__setattr__(self, "_original_first", original_first)
 
     def forward(self, image_tokens):
         if image_tokens.shape[-1] != self.image_features:
@@ -51,19 +59,17 @@ class Krea2ControlInputProjection(nn.Module):
 
         control_tokens = self.control_tokens
         if control_tokens is None:
-            control_tokens = torch.zeros(
-                image_tokens.shape[:-1] + (self.control_features,),
-                device=image_tokens.device,
-                dtype=image_tokens.dtype,
+            original_first = self.original_first
+            if original_first is not None:
+                return original_first(image_tokens)
+            raise RuntimeError("Krea2 control projection was called without control tokens.")
+        if control_tokens.shape[1] != image_tokens.shape[1]:
+            raise RuntimeError(
+                f"Krea2 control token count mismatch: image={image_tokens.shape[1]}, "
+                f"control={control_tokens.shape[1]}."
             )
-        else:
-            if control_tokens.shape[1] != image_tokens.shape[1]:
-                raise RuntimeError(
-                    f"Krea2 control token count mismatch: image={image_tokens.shape[1]}, "
-                    f"control={control_tokens.shape[1]}."
-                )
-            control_tokens = comfy.utils.repeat_to_batch_size(control_tokens, image_tokens.shape[0])
-            control_tokens = control_tokens.to(device=image_tokens.device, dtype=image_tokens.dtype)
+        control_tokens = comfy.utils.repeat_to_batch_size(control_tokens, image_tokens.shape[0])
+        control_tokens = control_tokens.to(device=image_tokens.device, dtype=image_tokens.dtype)
 
         x = torch.cat((image_tokens, control_tokens), dim=-1)
         weight = comfy.model_management.cast_to_device(self.weight, x.device, x.dtype)
@@ -295,7 +301,23 @@ def _make_control_projection(model_patcher, state_dict):
     if bias is None and hasattr(first, "bias") and torch.is_tensor(first.bias):
         bias = first.bias.detach()
 
-    return Krea2ControlInputProjection(state_dict[weight_key], bias=bias, image_features=image_features)
+    if isinstance(first, Krea2ControlInputProjection):
+        original_first = first.original_first
+    else:
+        original_first = first
+
+    return Krea2ControlInputProjection(
+        state_dict[weight_key],
+        bias=bias,
+        image_features=image_features,
+        original_first=original_first,
+    )
+
+
+def _clean_original_first(first):
+    if isinstance(first, Krea2ControlInputProjection) and first.original_first is not None:
+        return first.original_first
+    return first
 
 
 def _flatten_temporal_if_needed(control_latent):
@@ -378,32 +400,97 @@ def _control_tokens_from_latent(control_latent, x, patch, expected_features):
     return control
 
 
-def krea2_control_wrapper(executor, *args, **kwargs):
+def _get_transformer_options_from_forward(args, kwargs):
     transformer_options = kwargs.get("transformer_options", None)
     if transformer_options is None and len(args) >= 5 and isinstance(args[4], dict):
         transformer_options = args[4]
     if transformer_options is None and len(args) > 0 and isinstance(args[-1], dict):
         transformer_options = args[-1]
-    if not isinstance(transformer_options, dict):
-        return executor(*args, **kwargs)
+    return transformer_options
 
-    control_latent = transformer_options.get(CONTROL_LATENT_KEY)
-    if control_latent is None:
-        return executor(*args, **kwargs)
+
+def _restore_control_projection(diffusion_model, control_projection):
+    control_projection.control_tokens = None
+    original_first = control_projection.original_first
+    if original_first is not None and getattr(diffusion_model, "first", None) is control_projection:
+        diffusion_model.first = original_first
+
+
+def _make_control_projection_injection(control_projection):
+    def inject(model_patcher):
+        diffusion_model = getattr(model_patcher.model, "diffusion_model", None)
+        if diffusion_model is None:
+            return
+        current_first = _clean_original_first(getattr(diffusion_model, "first", None))
+        if current_first is not None and current_first is not control_projection:
+            control_projection.set_original_first(current_first)
+            diffusion_model.first = current_first
+        control_projection.control_tokens = None
+
+    def eject(model_patcher):
+        diffusion_model = getattr(model_patcher.model, "diffusion_model", None)
+        if diffusion_model is not None:
+            _restore_control_projection(diffusion_model, control_projection)
+
+    return [comfy.patcher_extension.PatcherInjection(inject=inject, eject=eject)]
+
+
+def _restore_control_projection_callback(model_patcher, *args):
+    attachment = model_patcher.get_attachment(WRAPPER_KEY)
+    if not isinstance(attachment, dict):
+        return
+    control_projection = attachment.get("control_projection")
+    if not isinstance(control_projection, Krea2ControlInputProjection):
+        return
+    diffusion_model = getattr(model_patcher.model, "diffusion_model", None)
+    if diffusion_model is None:
+        return
+    _restore_control_projection(diffusion_model, control_projection)
+
+
+def _krea2_control_wrapper(control_projection):
+    def wrapper(executor, *args, **kwargs):
+        return krea2_control_wrapper(executor, control_projection, *args, **kwargs)
+
+    return wrapper
+
+
+def krea2_control_wrapper(executor, control_projection, *args, **kwargs):
+    transformer_options = _get_transformer_options_from_forward(args, kwargs)
+    if not isinstance(transformer_options, dict):
+        raise RuntimeError("Krea2 Control LoRA could not find transformer_options during sampling.")
 
     diffusion_model = executor.class_obj
-    first = getattr(diffusion_model, "first", None)
-    if not isinstance(first, Krea2ControlInputProjection):
-        raise RuntimeError("Krea2 control LoRA loader must be applied before the control latent is attached.")
+    control_latent = transformer_options.get(CONTROL_LATENT_KEY)
+    if control_latent is None:
+        _restore_control_projection(diffusion_model, control_projection)
+        raise RuntimeError(
+            "Krea2 Control LoRA is loaded, but no control latent is attached. "
+            "Connect Krea2 Control Apply after Krea2 Control LoRA Loader, or remove the loader."
+        )
+
+    if not isinstance(control_projection, Krea2ControlInputProjection):
+        raise RuntimeError("Krea2 Control LoRA input projection is not installed. Reload the base model and loader.")
 
     x = args[0]
-    control_tokens = _control_tokens_from_latent(control_latent, x, diffusion_model.patch, first.control_features)
-    previous = first.control_tokens
-    first.control_tokens = control_tokens
+    previous_first = getattr(diffusion_model, "first", None)
+    previous_tokens = control_projection.control_tokens
     try:
+        control_tokens = _control_tokens_from_latent(
+            control_latent,
+            x,
+            diffusion_model.patch,
+            control_projection.control_features,
+        )
+        control_projection.control_tokens = control_tokens
+        if getattr(diffusion_model, "first", None) is not control_projection:
+            diffusion_model.first = control_projection
         return executor(*args, **kwargs)
     finally:
-        first.control_tokens = previous
+        control_projection.control_tokens = previous_tokens
+        if getattr(diffusion_model, "first", None) is control_projection:
+            original_first = control_projection.original_first
+            diffusion_model.first = original_first if original_first is not None else previous_first
 
 
 class Krea2ControlLoRALoader:
@@ -427,6 +514,8 @@ class Krea2ControlLoRALoader:
     def load_lora(self, model, lora_name, strength):
         if strength == 0:
             return (model,)
+        if model.get_attachment(WRAPPER_KEY) is not None:
+            raise RuntimeError("Krea2 Control LoRA is already loaded on this MODEL. Use only one loader per model path.")
 
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
         state_dict = None
@@ -450,11 +539,21 @@ class Krea2ControlLoRALoader:
         if not patched_keys:
             raise RuntimeError("The selected MODEL did not accept any Krea2 control LoRA patches.")
 
-        new_model.add_object_patch("diffusion_model.first", control_projection)
         new_model.add_wrapper_with_key(
             comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
             WRAPPER_KEY,
-            krea2_control_wrapper,
+            _krea2_control_wrapper(control_projection),
+        )
+        new_model.set_injections(WRAPPER_KEY, _make_control_projection_injection(control_projection))
+        new_model.add_callback_with_key(
+            comfy.patcher_extension.CallbacksMP.ON_DETACH,
+            WRAPPER_KEY,
+            _restore_control_projection_callback,
+        )
+        new_model.add_callback_with_key(
+            comfy.patcher_extension.CallbacksMP.ON_CLEANUP,
+            WRAPPER_KEY,
+            _restore_control_projection_callback,
         )
         new_model.set_attachments(
             WRAPPER_KEY,
@@ -463,6 +562,7 @@ class Krea2ControlLoRALoader:
                 "strength": strength,
                 "loaded_lora_keys": len(loaded_keys),
                 "patched_model_keys": len(patched_keys),
+                "control_projection": control_projection,
             },
         )
         return (new_model,)
@@ -491,6 +591,9 @@ class Krea2ControlApply:
             raise RuntimeError("control_latent['samples'] must be a tensor.")
 
         new_model = model.clone()
+        if new_model.get_attachment(WRAPPER_KEY) is None:
+            raise RuntimeError("Krea2 Control Apply must receive the MODEL output from Krea2 Control LoRA Loader.")
+
         samples = _process_control_latent_for_model(new_model, samples)
         transformer_options = new_model.model_options.setdefault("transformer_options", {})
         transformer_options[CONTROL_LATENT_KEY] = samples
