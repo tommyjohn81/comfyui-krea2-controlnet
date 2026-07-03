@@ -1,0 +1,40 @@
+# ComfyUI Krea2 Control
+
+Chinese documentation: [README_zh.md](README_zh.md)
+
+Native-style ComfyUI nodes for Krea2 Control LoRA inference. The plugin keeps ComfyUI's built-in Krea2 inference path intact, replaces the expanded input projection from the LoRA checkpoint, and injects a VAE-encoded control latent during sampling.
+
+## Nodes
+
+- `Krea2 Control LoRA Loader`: loads a Krea2 Control LoRA from `models/loras`, applies compatible block LoRA weights to the Krea2 model, replaces the input projection, and registers the sampling wrapper.
+- `Krea2 Control Image Encode`: encodes any control `IMAGE` with the supplied Krea2/Qwen VAE. It can consume outputs from [`comfyui_controlnet_aux`](https://github.com/Fannovel16/comfyui_controlnet_aux) preprocessors such as Depth Anything, Canny, OpenPose, lineart, and normal maps, but it does not import or call `comfyui_controlnet_aux`.
+- `Krea2 Control Apply`: converts the encoded control latent into the Krea2 latent space and attaches it to the model after the Control LoRA has been loaded.
+
+## Basic Workflow
+
+1. Prepare a control image with normal ComfyUI nodes, or connect a [`comfyui_controlnet_aux`](https://github.com/Fannovel16/comfyui_controlnet_aux) preprocessor output.
+2. Encode that control image with `Krea2 Control Image Encode` using the Krea2/Qwen image VAE. Keep the default `match_latent_size` and connect the sampler latent to this node's `latent` input.
+3. Load the Krea2 Control LoRA with `Krea2 Control LoRA Loader`.
+4. Attach the encoded latent with `Krea2 Control Apply`.
+5. Send the resulting model to your sampler.
+
+`match_latent_size` is the default because the reference flow resizes the control image to the final generation size before VAE encoding. Switch to `keep_control_image_size` only if you already resized and cropped the control image elsewhere.
+
+`Krea2 Control Image Encode` is generic and does not run depth, canny, pose, or other preprocessors. Its image options are lightweight tensor operations:
+
+- `channel_mode`: keep RGB controls as-is, or convert to grayscale and repeat back to RGB before VAE encoding.
+- `normalize`: `per_image_minmax` normalizes each image independently and is useful for matching the reference depth flow.
+- `invert`: flips `[0,1]` control values when the preprocessor convention is reversed from the LoRA's training convention.
+- `batch_mode`: `independent_images` keeps image batches as separate samples when using 3D Krea2/Qwen VAEs; `video_frames` preserves ComfyUI's default video-style VAE behavior.
+
+For the public depth LoRA, a good starting point with a Depth Anything output is `channel_mode=grayscale`, `normalize=per_image_minmax`, and `invert=false`. Turn `invert` on only if the depth preview shows near objects as dark instead of white.
+
+Other LoRA types such as canny, pose, lineart, or normal should usually use `channel_mode=rgb`, `normalize=none`, and `invert=false`.
+
+The control type is determined by the LoRA checkpoint. A depth LoRA needs a depth-like control image; pose, canny, and normal LoRAs need the matching preprocessor image.
+
+The encode node returns normal VAE-space latents. The apply node performs the same Krea2 latent-format normalization that ComfyUI applies to the sampler's main latent before the DiT sees it.
+
+## Acknowledgements
+
+Thanks to [Krea-2-controlnet](https://github.com/Tanmaypatil123/Krea-2-controlnet) for documenting the reference Krea2 control-LoRA inference pipeline.
