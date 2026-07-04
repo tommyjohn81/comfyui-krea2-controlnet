@@ -23,6 +23,8 @@
 
 Block LoRA 权重通过 ComfyUI 的 `ModelPatcher` 应用，因此模型加载、卸载和低显存行为仍然遵循 ComfyUI 原生机制。在 Krea2 diffusion forward 调用期间，图像 token 仍然经过原生 `first` 投影层，因此普通 LoRA 对基础模型的 patch 仍会生效；Control LoRA 只贡献扩展投影中的 control-token 部分。临时投影状态会在调用结束后立即恢复，删除节点后不会把基础 Krea2 生图路径留在 patch 状态。
 
+LoRA block 匹配会读取模型实际模块权重 shape，而不是只依赖 `state_dict()` 中的 shape，因此能更好兼容量化/GGUF UNET loader 这类可能在 state dict 中暴露存储形状的模型。
+
 `match_latent_size` 是默认设置。参考流程会先把控制图缩放到最终生成尺寸，再进行 VAE 编码；这里也按同样的顺序处理。如果你已经用其他 ComfyUI 图像节点提前完成了裁切和缩放，可以改用 `keep_control_image_size`。
 
 ## 控制图选项

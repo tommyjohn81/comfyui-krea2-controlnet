@@ -26,6 +26,8 @@ Native-style ComfyUI nodes for Krea2 Control LoRA inference. The plugin keeps Co
 
 Block LoRA weights are applied through ComfyUI's `ModelPatcher` so normal model loading, offload, and low-VRAM behavior still apply. During the Krea2 diffusion forward call, image tokens still pass through the native `first` projection so regular LoRA patches on the base model remain active; the Control LoRA contributes only the control-token half of the expanded projection. The temporary projection state is restored immediately afterwards, so removing the node does not leave the base Krea2 path patched.
 
+LoRA block matching reads the live module weight shapes instead of relying only on `state_dict()` shapes, which improves compatibility with quantized/GGUF UNET loaders whose state dict may expose storage-shaped tensors.
+
 `match_latent_size` is the default because the reference flow resizes the control image to the final generation size before VAE encoding. Switch to `keep_control_image_size` only if you already resized and cropped the control image elsewhere.
 
 `Krea2 Control Image Encode` is generic and does not run depth, canny, pose, or other preprocessors. Its image options are lightweight tensor operations:

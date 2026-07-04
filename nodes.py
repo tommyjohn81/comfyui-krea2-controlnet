@@ -229,19 +229,64 @@ def _lora_pairs(state_dict):
             yield base, down_key, up_key
 
 
-def _build_lora_patches(state_dict, model_state_dict):
+def _get_nested_model_attr(obj, key):
+    for part in key.split("."):
+        try:
+            obj = getattr(obj, part)
+        except AttributeError:
+            if part.isdigit() and hasattr(obj, "__getitem__"):
+                obj = obj[int(part)]
+            else:
+                raise
+    return obj
+
+
+def _shape_from_weight(weight):
+    tensor_shape = getattr(weight, "tensor_shape", None)
+    if tensor_shape is not None:
+        return tuple(tensor_shape)
+    data = getattr(weight, "data", None)
+    tensor_shape = getattr(data, "tensor_shape", None)
+    if tensor_shape is not None:
+        return tuple(tensor_shape)
+    shape = getattr(weight, "shape", None)
+    if shape is not None:
+        return tuple(shape)
+    return None
+
+
+def _shape_from_model_key(model_patcher, key):
+    try:
+        weight = _get_nested_model_attr(model_patcher.model, key)
+    except Exception:
+        return None
+    return _shape_from_weight(weight)
+
+
+def _build_lora_patches(state_dict, model_patcher):
     patches = {}
     loaded_keys = set()
     skipped = []
+    model_state_dict = model_patcher.model.state_dict()
 
     for base, down_key, up_key in _lora_pairs(state_dict):
         target_key = _target_key_from_lora_base(base)
-        if target_key is None or target_key not in model_state_dict:
+        if target_key is None:
             continue
 
         down = state_dict[down_key]
         up = state_dict[up_key]
-        target_shape = tuple(model_state_dict[target_key].shape)
+        target_shape = _shape_from_model_key(model_patcher, target_key)
+        if target_shape is None:
+            value = model_state_dict.get(target_key)
+            if torch.is_tensor(value):
+                target_shape = tuple(value.shape)
+        if target_shape is None:
+            continue
+        if len(target_shape) < 2:
+            skipped.append((down_key, up_key, f"target shape is {target_shape}"))
+            continue
+
         if not (torch.is_tensor(down) and torch.is_tensor(up) and down.ndim == 2 and up.ndim == 2):
             skipped.append((down_key, up_key, "not 2D tensors"))
             continue
@@ -288,9 +333,10 @@ def _first_shape(first):
     if isinstance(first, Krea2ControlInputProjection):
         return first.out_features, first.image_features, first.control_features
     weight = getattr(first, "weight", None)
-    if not torch.is_tensor(weight) or weight.ndim != 2:
+    weight_shape = _shape_from_weight(weight)
+    if weight_shape is None or len(weight_shape) != 2:
         raise RuntimeError("Krea2 first projection does not expose a 2D weight tensor.")
-    return int(weight.shape[0]), int(weight.shape[1]), int(weight.shape[1])
+    return int(weight_shape[0]), int(weight_shape[1]), int(weight_shape[1])
 
 
 def _make_control_projection(model_patcher, state_dict):
@@ -538,7 +584,7 @@ class Krea2ControlLoRALoader:
 
         new_model = model.clone()
         control_projection = _make_control_projection(new_model, state_dict)
-        lora_patches, loaded_keys = _build_lora_patches(state_dict, new_model.model.state_dict())
+        lora_patches, loaded_keys = _build_lora_patches(state_dict, new_model)
         if not lora_patches:
             raise RuntimeError("No compatible Krea2 control LoRA block weights were found in the selected file.")
 
