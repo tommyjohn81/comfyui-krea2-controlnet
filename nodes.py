@@ -526,18 +526,34 @@ def krea2_control_wrapper(executor, control_projection, *args, **kwargs):
         raise RuntimeError("Krea2 Control LoRA input projection is not installed. Reload the base model and loader.")
 
     x = args[0]
+    t = args[1]
+    
+    # Extract current step representation (sigma)
+    current_sigma = t[0].item() if torch.is_tensor(t) else float(t)
+    sigma_start = transformer_options.get(WRAPPER_KEY + "_sigma_start", 999999999.0)
+    sigma_end = transformer_options.get(WRAPPER_KEY + "_sigma_end", -1.0)
+    
+    # Diffusers/Comfy sigmas decrease as generation progresses, so we evaluate bounds backwards
+    is_active = (current_sigma <= sigma_start + 1e-4) and (current_sigma >= sigma_end - 1e-4)
+
     previous_first = getattr(diffusion_model, "first", None)
     previous_tokens = control_projection.control_tokens
     try:
-        control_tokens = _control_tokens_from_latent(
-            control_latent,
-            x,
-            diffusion_model.patch,
-            control_projection.control_features,
-        )
-        control_projection.control_tokens = control_tokens
+        if is_active:
+            control_tokens = _control_tokens_from_latent(
+                control_latent,
+                x,
+                diffusion_model.patch,
+                control_projection.control_features,
+            )
+            control_projection.control_tokens = control_tokens
+        else:
+            # Bypass concatenation for this step by stripping tokens
+            control_projection.control_tokens = None
+            
         if getattr(diffusion_model, "first", None) is not control_projection:
             diffusion_model.first = control_projection
+            
         return executor(*args, **kwargs)
     finally:
         control_projection.control_tokens = previous_tokens
@@ -628,6 +644,8 @@ class Krea2ControlApply:
             "required": {
                 "model": ("MODEL",),
                 "control_latent": ("LATENT",),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
         }
 
@@ -635,7 +653,7 @@ class Krea2ControlApply:
     FUNCTION = "apply"
     CATEGORY = "Krea2/control"
 
-    def apply(self, model, control_latent):
+    def apply(self, model, control_latent, start_percent=0.0, end_percent=1.0):
         if "samples" not in control_latent:
             raise RuntimeError("control_latent is missing LATENT['samples'].")
 
@@ -650,6 +668,19 @@ class Krea2ControlApply:
         samples = _process_control_latent_for_model(new_model, samples)
         transformer_options = new_model.model_options.setdefault("transformer_options", {})
         transformer_options[CONTROL_LATENT_KEY] = samples
+        
+        # Convert user percentages to internal mathematical sigmas to evaluate timestep states
+        try:
+            ms = new_model.get_model_object("model_sampling")
+            sigma_start = float(ms.percent_to_sigma(start_percent))
+            sigma_end = float(ms.percent_to_sigma(end_percent))
+        except Exception:
+            sigma_start = 999999999.0
+            sigma_end = -1.0
+            
+        transformer_options[WRAPPER_KEY + "_sigma_start"] = sigma_start
+        transformer_options[WRAPPER_KEY + "_sigma_end"] = sigma_end
+        
         return (new_model,)
 
 
